@@ -21,9 +21,10 @@ const loginLimiter = rateLimit({
     message: 'Too many login attempts'
 });
 
-app.post('/api/login',
-    loginLimiter,
-    [
+app.post('/api/login', (req, res) => {
+  const { username, password } = req.body;
+  // vérification user/pass
+});    [
         body('username').isString().trim().notEmpty(),
         body('password').isString().notEmpty().isLength({ min: 8 })
     ],
