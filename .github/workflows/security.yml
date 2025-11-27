@@ -1,0 +1,53 @@
+name: DevSecOps Pipeline
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+
+    - name: Setup Node
+      uses: actions/setup-node@v3
+      with:
+        node-version: 16
+
+    - name: Install dependencies
+      run: npm install --legacy-peer-deps || true
+
+    - name: NPM Audit
+      run: npm audit --json > npm-audit.json || true
+
+    - name: Build Docker Image
+      run: docker build -t vuln-app .
+
+    - name: Run Trivy
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'vuln-app'
+        format: 'table'
+        severity: 'HIGH,CRITICAL'
+        output: 'trivy-report.txt'
+
+    - name: Run application
+      run: docker run -d -p 3000:3000 --name vuln-app-run vuln-app
+
+    - name: ZAP Scan
+      uses: zaproxy/action-baseline@v0.6.0
+      with:
+        target: "http://localhost:3000"
+        cmd_options: "-r zap-report.html"
+
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports
+        path: |
+          npm-audit.json
+          trivy-report.txt
+          zap-report.html
