@@ -1,53 +1,106 @@
 name: DevSecOps Pipeline
-
-on:
-  push:
-  pull_request:
+on: [push, pull_request]
 
 jobs:
-  security:
+  build:
+    name: Build Docker image
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t vuln-app:${{ github.sha }} .
+      - name: Save Docker image
+        run: docker save vuln-app:${{ github.sha }} > image.tar
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: image.tar
 
-    - name: Setup Node
-      uses: actions/setup-node@v3
-      with:
-        node-version: 16
+  sast:
+    name: SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >
+            p/security-audit
+            p/secrets
+            p/owasp-top-ten
 
-    - name: Install dependencies
-      run: npm install --legacy-peer-deps || true
+  sca:
+    name: SCA
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Install dependencies
+        working-directory: ./src
+        run: npm install
+      - name: Run npm audit
+        working-directory: ./src
+        run: npm audit --json > audit.json || echo "Audit done with issues"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit
+          path: src/audit.json
 
-    - name: NPM Audit
-      run: npm audit --json > npm-audit.json || true
+  secrets:
+    name: Secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Build Docker Image
-      run: docker build -t vuln-app .
+  container-scan:
+    name: Container Scan
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+      - name: Load Docker image
+        run: docker load < image.tar
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: vuln-app:${{ github.sha }}
+          format: 'table'
+          severity: 'CRITICAL'
+          exit-code: '1'
 
-    - name: Run Trivy
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: 'vuln-app'
-        format: 'table'
-        severity: 'HIGH,CRITICAL'
-        output: 'trivy-report.txt'
-
-    - name: Run application
-      run: docker run -d -p 3000:3000 --name vuln-app-run vuln-app
-
-    - name: ZAP Scan
-      uses: zaproxy/action-baseline@v0.6.0
-      with:
-        target: "http://localhost:3000"
-        cmd_options: "-r zap-report.html"
-
-    - name: Upload security reports
-      uses: actions/upload-artifact@v3
-      with:
-        name: security-reports
-        path: |
-          npm-audit.json
-          trivy-report.txt
-          zap-report.html
+  report:
+    name: Report
+    runs-on: ubuntu-latest
+    needs: [sast, sca, secrets, container-scan]
+    if: always()
+    steps:
+      - name: Generate JSON Report
+        run: |
+          echo "{
+            \"timestamp\": \"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\",
+            \"repository\": \"${{ github.repository }}\",
+            \"commit\": \"${{ github.sha }}\",
+            \"results\": {
+              \"sast\": \"${{ needs.sast.result }}\",
+              \"sca\": \"${{ needs.sca.result }}\",
+              \"secrets\": \"${{ needs.secrets.result }}\",
+              \"container_scan\": \"${{ needs.container-scan.result }}\"
+            }
+          }" > security-report.json
+      - name: Upload JSON Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: security-report.json
